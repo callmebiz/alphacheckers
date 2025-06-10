@@ -2,6 +2,5 @@ __pycache__/
 saved_models/
 model/
 *.json
-*.txt
 *.ipynb
 *.png
