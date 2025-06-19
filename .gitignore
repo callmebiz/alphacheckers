@@ -1,6 +1,10 @@
 __pycache__/
-saved_models/
+saved_models*/
 model/
 *.json
 *.ipynb
 *.png
+
+play.py
+MCTS.py
+CheckersAlpha2.py

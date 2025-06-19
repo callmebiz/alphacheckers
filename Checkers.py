@@ -1,6 +1,7 @@
+# Checkers.py - FIXED VERSION
+
 import numpy as np
 from collections import defaultdict
-import hashlib
 
 
 class Checkers:
@@ -12,16 +13,22 @@ class Checkers:
         
         self.playable_positions = []
         self.move_map = {}  # Maps each playable position to its valid moves
-        self.action_size = 0
         
-        self.initialize_action_encoding()
+        self.move_names = {
+            (-1, -1): "Up-Left", (-1, 1): "Up-Right",
+            (1, -1): "Down-Left", (1, 1): "Down-Right",
+            (-2, -2): "Jump Up-Left", (-2, 2): "Jump Up-Right",
+            (2, -2): "Jump Down-Left", (2, 2): "Jump Down-Right"
+        }
         
+        self.action_size = self.initialize_action_encoding()
+        print(f"Total Action Size: {self.action_size}")
+
     def initialize_action_encoding(self):
         """
         Determines the valid actions for each playable square and sets action_size.
         """
-        move_offsets = [(-1, -1), (-1, 1), (1, -1), (1, 1), (-2, -2), (-2, 2), (2, -2), (2, 2)]
-        action_index = 0
+        action_size = 0
 
         for r in range(self.row_count):
             for c in range(self.col_count):
@@ -29,19 +36,17 @@ class Checkers:
                     continue  # Skip non-playable squares
                 
                 valid_moves = []
-                for move in move_offsets:
-                    dr, dc = move
+                for (dr, dc) in self.move_names.keys():
                     new_r, new_c = r + dr, c + dc
                     
                     if 0 <= new_r < self.row_count and 0 <= new_c < self.col_count:
-                        valid_moves.append((new_r, new_c, action_index))
-                        action_index += 1
+                        valid_moves.append((new_r, new_c, action_size, dr, dc))
+                        action_size += 1
 
                 self.playable_positions.append((r, c))
                 self.move_map[(r, c)] = valid_moves
 
-        self.action_size = action_index
-        print(f"Total Action Size: {self.action_size}")
+        return action_size
         
     def load_state(self, filename):
         with open(filename, "r") as file:
@@ -70,11 +75,10 @@ class Checkers:
         }
 
         # Compute initial board hash and update board history
-        board_hash = int(hashlib.md5(state['board'].tobytes()).hexdigest(), 16)
+        board_hash = state['board'].tobytes()
         state['board_history'][board_hash] = 1
 
         return state, player
-
     
     def show_board(self, state, player=None):
         """Prints the checkers board with proper alignment for any board size."""
@@ -106,6 +110,38 @@ class Checkers:
             print(f"Player {player}")
             valid_moves = self.get_valid_moves(state, player)
             self.show_valid_moves(valid_moves)
+    
+    def show_policy(self, policy, value, k):
+        """
+        Displays the top k actions with the highest probability from the given policy.
+        Prints the starting position, destination, move type, and policy index.
+        """
+        move_offsets = [
+            (-1, -1, "Up-Left"), (-1, 1, "Up-Right"),
+            (1, -1, "Down-Left"), (1, 1, "Down-Right"),
+            (-2, -2, "Jump Up-Left"), (-2, 2, "Jump Up-Right"),
+            (2, -2, "Jump Down-Left"), (2, 2, "Jump Down-Right")
+        ]
+
+        # Get the top k action indices sorted by probability
+        top_k_indices = np.argsort(policy)[-k:][::-1]  # Sort descending
+
+        print(f"Value: {value:.3f}")
+        print("Top Policy Moves")
+        print("----------------")
+
+        for idx in top_k_indices:
+            position_index = idx // 8
+            move_type = idx % 8
+
+            from_row = position_index // self.col_count
+            from_col = position_index % self.col_count
+
+            dr, dc, move_name = move_offsets[move_type]
+            to_row = from_row + dr
+            to_col = from_col + dc
+
+            print(f"({from_row}, {from_col}) -> ({to_row}, {to_col}) ({move_name}) [idx={idx}, prob={policy[idx]:.3f}]")
 
     def get_initial_state(self):
         """
@@ -136,56 +172,54 @@ class Checkers:
             'no_progress_moves': 0,
             'jump_again': None
         }
-        
+
     def get_valid_moves(self, state, player, enforce_piece=None):
         """
-        Returns a boolean array encoding valid moves for each piece.
+        Returns a 1D binary array indicating valid moves.
+        Normal pieces move/jump in one direction, kings move/jump in all directions.
+        If a jump move is possible, only jump moves are valid.
         """
         board = state['board']
-        valid_moves = np.zeros(self.row_count * self.col_count * 8)
-        directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        valid_moves = np.zeros(self.action_size, dtype=int)
         jump_moves_exist = False
+        potential_jumps = []
 
-        for row in range(self.row_count):
-            for col in range(self.col_count):
-                piece = board[row, col]
-                if piece == 0 or (piece != player and piece != 2 * player):
-                    continue
-                
-                # Only check enforce_pice if given (for multi-jump moves)
-                if enforce_piece and (row, col) != enforce_piece:
-                    continue
+        # Iterate through all playable positions
+        for (r, c) in self.playable_positions:
+            piece = board[r, c]
+            if piece == 0 or (piece != player and piece != 2 * player):
+                continue  # Skip empty squares or opponent pieces
+            
+            if state['jump_again'] and (r, c) != state['jump_again']:
+                continue
 
-                index = (row * self.col_count + col) * 8
-                is_king = abs(piece) == 2
-                valid_directions = [is_king or player == 1, is_king or player == 1,
-                                    is_king or player == -1, is_king or player == -1]
+            is_king = abs(piece) == 2  # Determine if the piece is a king
+            if enforce_piece and (r, c) != enforce_piece:
+                continue  # If enforcing a piece, skip other pieces
 
-                for move_idx, (dr, dc) in enumerate(directions):
-                    if not valid_directions[move_idx]:
-                        continue
-
-                    new_row, new_col = row + dr, col + dc
-                    jump_row, jump_col = row + 2 * dr, col + 2 * dc
-                    move_slot, jump_slot = index + move_idx, index + move_idx + 4
-
-                    if 0 <= new_row < self.row_count and 0 <= new_col < self.col_count:
-                        if board[new_row, new_col] == 0 and not enforce_piece:
-                            valid_moves[move_slot] = 1
-                        elif (0 <= jump_row < self.row_count and 0 <= jump_col < self.col_count and
-                              board[new_row, new_col] in {-player, -2 * player} and
-                              board[jump_row, jump_col] == 0):
-                            valid_moves[jump_slot] = 1
+            for new_r, new_c, action_idx, dr, dc in self.move_map[(r, c)]:
+                # Jump move (two steps)
+                if abs(new_r - r) == 2:
+                    mid_r, mid_c = (r + new_r) // 2, (c + new_c) // 2
+                    if board[mid_r, mid_c] in {-player, -2 * player} and board[new_r, new_c] == 0:
+                        if is_king or (player == 1 and dr == -2) or (player == -1 and dr == 2):
+                            valid_moves[action_idx] = 1
                             jump_moves_exist = True
+                            potential_jumps.append(action_idx)
 
+                # Normal move (one step)
+                elif board[new_r, new_c] == 0:
+                    if not enforce_piece and (is_king or (player == 1 and dr == -1) or (player == -1 and dr == 1)):
+                        valid_moves[action_idx] = 1
+
+        # If a jump move exists, remove all normal moves
         if jump_moves_exist:
-            for i in range(len(valid_moves)):
-                if i % 8 < 4:  # Non-jump moves are in the first 4 slots of each position
-                    valid_moves[i] = 0
+            valid_moves = np.zeros(self.action_size, dtype=int)
+            for action_idx in potential_jumps:
+                valid_moves[action_idx] = 1
 
         return valid_moves
 
-    
     def get_next_state(self, state, action, player):
         """
         Returns the new game state after applying the given action.
@@ -197,69 +231,52 @@ class Checkers:
             'jump_again': state['jump_again']
         }
         
-        ## TODO: r, c, nr, nr = self.action_to_move(action)
-        
-        position_index = action // 8
-        move_type = action % 8
-        row, col = position_index // self.col_count, position_index % self.col_count
-        move_offsets = [(-1, -1), (-1, 1), (1, -1), (1, 1), (-2, -2), (-2, 2), (2, -2), (2, 2)]
-        dr, dc = move_offsets[move_type]
-        new_row, new_col = row + dr, col + dc
-
-        new_state['board'][new_row, new_col] = new_state['board'][row, col]
-        new_state['board'][row, col] = 0
-
-        capture, promotion = False, False
-        if move_type >= 4:
-            mid_row, mid_col = (row + new_row) // 2, (col + new_col) // 2
-            new_state['board'][mid_row, mid_col] = 0
-            capture = True
-
-        if capture and self.get_valid_moves(new_state, player, enforce_piece=(new_row, new_col)).any():
-            new_state['jump_again'] = (new_row, new_col)
-        else:
-            new_state['jump_again'] = None
-
-        if ((player == 1 and new_row == 0) or (player == -1 and new_row == self.row_count - 1)) \
-            and abs(new_state['board'][new_row, new_col]) == 1:
-            new_state['board'][new_row, new_col] *= 2
-            promotion = True
-
-        if capture or promotion:
-            new_state['no_progress_moves'] = 0
-        else:
-            new_state['no_progress_moves'] += 1
-
-        board_hash = int(hashlib.md5(new_state['board'].tobytes()).hexdigest(), 16)
-        new_state['board_history'][board_hash] += 1
-        
-        return new_state
+        for (r, c), moves in self.move_map.items():
+            for new_r, new_c, action_idx, _, _ in moves:
+                if action == action_idx:
+                    new_state['board'][new_r, new_c] = new_state['board'][r, c]
+                    new_state['board'][r, c] = 0
+                    
+                    # Handle capture
+                    if abs(new_r - r) == 2:
+                        mid_r, mid_c = (r + new_r) // 2, (c + new_c) // 2
+                        new_state['board'][mid_r, mid_c] = 0
+                        
+                        if self.get_valid_moves(new_state, player, enforce_piece=(new_r, new_c)).any():
+                            new_state['jump_again'] = (new_r, new_c)
+                        else:
+                            new_state['jump_again'] = None
+                    else:
+                        new_state['jump_again'] = None
+                    
+                    # Handle promotion
+                    if ((player == 1 and new_r == 0) or (player == -1 and new_r == self.row_count - 1)) and abs(new_state['board'][new_r, new_c]) == 1:
+                        new_state['board'][new_r, new_c] *= 2
+                    
+                    # Reset move counter if capture or promotion
+                    if new_state['jump_again'] or new_state['board'][new_r, new_c] == 2 * player:
+                        new_state['no_progress_moves'] = 0
+                    else:
+                        new_state['no_progress_moves'] += 1
+                    
+                    # Update board history
+                    board_hash = new_state['board'].tobytes()
+                    new_state['board_history'][board_hash] += 1
+                    
+                    return new_state
+                    
+        return new_state  # still return if not action is matched
     
     def show_valid_moves(self, valid_moves):
-        move_offsets = [
-            (-1, -1, "Up-Left"), (-1, 1, "Up-Right"),
-            (1, -1, "Down-Left"), (1, 1, "Down-Right"),
-            (-2, -2, "Jump Up-Left"), (-2, 2, "Jump Up-Right"),
-            (2, -2, "Jump Down-Left"), (2, 2, "Jump Down-Right")
-        ]
-
         print("Valid Moves")
         print("------------")
 
         move_list = []
-        for idx, val in enumerate(valid_moves):
-            if val == 1:
-                position_index = idx // 8
-                move_type = idx % 8
-
-                from_row = position_index // self.col_count
-                from_col = position_index % self.col_count
-
-                dr, dc, move_name = move_offsets[move_type]
-                to_row = from_row + dr
-                to_col = from_col + dc
-
-                move_list.append(f"{len(move_list)}: ({from_row}, {from_col}) -> ({to_row}, {to_col}) ({move_name}) \t[idx={idx}]")
+        for (r, c), moves in self.move_map.items():
+            for new_r, new_c, action_idx, dr, dc in moves:
+                if valid_moves[action_idx] == 1:
+                    move_name = self.move_names[(dr, dc)]
+                    move_list.append(f"{len(move_list)}: ({r}, {c}) -> ({new_r}, {new_c}) ({move_name}) [idx={action_idx}]")
 
         for move in move_list:
             print(move)
@@ -274,7 +291,9 @@ class Checkers:
             return True  # Opponent has no pieces, player wins
 
         # Check if opponent has any valid moves left
-        valid_moves_opponent = self.get_valid_moves(state, opponent)
+        state_copy = state.copy()
+        state_copy['jump_again'] = None
+        valid_moves_opponent = self.get_valid_moves(state_copy, opponent)
         if not valid_moves_opponent.any():
             return True  # No valid moves, player wins by opponent's forced pass
         return False  # Game is still ongoing
@@ -295,6 +314,9 @@ class Checkers:
         """Determine if the game is over and log results if tracking stats."""
         if self.check_win(state, player):
             return 1, True  # Player wins
+        
+        if self.check_win(state, -player):
+            return -1, True  # Opponent wins
 
         if self.check_draw(state):
             return 0, True  # Draw
@@ -307,22 +329,63 @@ class Checkers:
     def get_opponent_value(self, value):
         return -value
     
-    def get_encoded_state(self, state, player, ver=1):
+    def get_encoded_state(self, state, player):
+        """
+        FIXED: Consistent state encoding regardless of player
+        """
         board = state['board']
-        if ver == 1:
-            encoded_state = np.stack(
-                (board == -2, board == -1, board == 1, board == 2)  # encode each piece type
-            ).astype(np.float32) * player  # different encoding for different players due do different valid actions per player
-        else:
-            encoded_state = board.astype(np.float32) * player
+        
+        if player == 1:
+            # Player 1's perspective: their pieces are positive in channels 2-3
+            encoded_state = np.stack([
+                board == -2,  # Opponent kings
+                board == -1,  # Opponent normal pieces
+                board == 1,   # Player normal pieces  
+                board == 2    # Player kings
+            ]).astype(np.float32)
+        else:  # player == -1
+            # Player -1's perspective: their pieces become positive in channels 2-3
+            encoded_state = np.stack([
+                board == 2,   # Opponent kings (was player 1's)
+                board == 1,   # Opponent normal pieces (was player 1's)
+                board == -1,  # Player normal pieces (now positive)
+                board == -2   # Player kings (now positive)
+            ]).astype(np.float32)
+        
         return encoded_state
+    
+    def decode_encoded_state(self, encoded_state, player):
+        """
+        Converts an encoded state back into the board representation.
+
+        Args:
+        - encoded_state: The encoded board state as a NumPy array.
+        - player: The player perspective used in encoding.
+
+        Returns:
+        - A NumPy array representing the board.
+        """
+        board = np.zeros((self.row_count, self.col_count), dtype=int)
+        
+        if player == 1:
+            board[encoded_state[0] == 1] = -2  # Opponent kings
+            board[encoded_state[1] == 1] = -1  # Opponent normal pieces
+            board[encoded_state[2] == 1] = 1   # Player normal pieces
+            board[encoded_state[3] == 1] = 2   # Player kings
+        else:  # player == -1
+            board[encoded_state[0] == 1] = 2   # Opponent kings
+            board[encoded_state[1] == 1] = 1   # Opponent normal pieces  
+            board[encoded_state[2] == 1] = -1  # Player normal pieces
+            board[encoded_state[3] == 1] = -2  # Player kings
+
+        return board
 
 
 if __name__ == "__main__":
     checkers = Checkers(row_count=8, col_count=8, buffer_count=2, draw_move_limit=50)
     state = checkers.get_initial_state()
     player = 1
-    state, player = checkers.load_state("state_multiJump3.txt")
+    # state, player = checkers.load_state("state_multiJump3.txt")
 
     while True:
         checkers.show_board(state)  # Print board with row/col indices
@@ -384,5 +447,5 @@ if __name__ == "__main__":
             break
 
         # If the last move didn't require another jump, switch players
-        if not state['jump_again']:
+        if state['jump_again'] is None:
             player = checkers.get_opponent(player)
