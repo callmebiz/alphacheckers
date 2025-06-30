@@ -1,15 +1,18 @@
-# Checkers.py - FIXED VERSION
+# Checkers.py
 
 import numpy as np
 from collections import defaultdict
 
 
 class Checkers:
-    def __init__(self, row_count=8, col_count=8, buffer_count=2, draw_move_limit=50):
+    def __init__(self, row_count=8, col_count=8, buffer_count=2, draw_move_limit=50, 
+                 repetition_limit=3, history_timesteps=4):
         self.row_count = row_count
         self.col_count = col_count
         self.buffer_count = buffer_count
         self.draw_move_limit = draw_move_limit
+        self.repetition_limit = repetition_limit  # How many repetitions trigger a draw
+        self.history_timesteps = history_timesteps  # Number of historical board states to track
         
         self.playable_positions = []
         self.move_map = {}  # Maps each playable position to its valid moves
@@ -23,6 +26,8 @@ class Checkers:
         
         self.action_size = self.initialize_action_encoding()
         print(f"Total Action Size: {self.action_size}")
+        print(f"History Timesteps: {self.history_timesteps}")
+        print(f"Repetition Limit: {self.repetition_limit}")
 
     def initialize_action_encoding(self):
         """
@@ -69,14 +74,15 @@ class Checkers:
         # Initialize the state dictionary
         state = {
             'board': board,
-            'board_history': defaultdict(int),
+            'state_repetitions': defaultdict(int),  # Count occurrences of each position
             'no_progress_moves': 0,
-            'jump_again': None
+            'jump_again': None,
+            'board_timesteps': [board.copy()]  # Historical board positions for neural network
         }
 
-        # Compute initial board hash and update board history
+        # Compute initial board hash and update position counts
         board_hash = state['board'].tobytes()
-        state['board_history'][board_hash] = 1
+        state['state_repetitions'][board_hash] = 1
 
         return state, player
     
@@ -147,9 +153,10 @@ class Checkers:
         """
         Returns the initial game state as a dictionary containing:
         - 'board': NumPy array representing the board.
-        - 'board_history': defaultdict to track previous states.
+        - 'state_repetitions': defaultdict to track position repetitions.
         - 'no_progress_moves': Counter for no-capture moves.
         - 'jump_again': Flag to enforce multi-jump moves.
+        - 'board_timesteps': List of previous board states for neural network input.
         """
         board = np.zeros((self.row_count, self.col_count), dtype=int)
         player_rows = (self.row_count - self.buffer_count) // 2
@@ -168,9 +175,10 @@ class Checkers:
 
         return {
             'board': board,
-            'board_history': defaultdict(int),
+            'state_repetitions': defaultdict(int),
             'no_progress_moves': 0,
-            'jump_again': None
+            'jump_again': None,
+            'board_timesteps': [board.copy()]  # Initialize with current board
         }
 
     def get_valid_moves(self, state, player, enforce_piece=None):
@@ -226,9 +234,10 @@ class Checkers:
         """
         new_state = {
             'board': state['board'].copy(),
-            'board_history': state['board_history'].copy(),
+            'state_repetitions': state['state_repetitions'].copy(),
             'no_progress_moves': state['no_progress_moves'],
-            'jump_again': state['jump_again']
+            'jump_again': state['jump_again'],
+            'board_timesteps': state['board_timesteps'].copy()
         }
         
         for (r, c), moves in self.move_map.items():
@@ -238,9 +247,11 @@ class Checkers:
                     new_state['board'][r, c] = 0
                     
                     # Handle capture
+                    capture_made = False
                     if abs(new_r - r) == 2:
                         mid_r, mid_c = (r + new_r) // 2, (c + new_c) // 2
                         new_state['board'][mid_r, mid_c] = 0
+                        capture_made = True
                         
                         if self.get_valid_moves(new_state, player, enforce_piece=(new_r, new_c)).any():
                             new_state['jump_again'] = (new_r, new_c)
@@ -250,22 +261,31 @@ class Checkers:
                         new_state['jump_again'] = None
                     
                     # Handle promotion
+                    promotion_made = False
                     if ((player == 1 and new_r == 0) or (player == -1 and new_r == self.row_count - 1)) and abs(new_state['board'][new_r, new_c]) == 1:
                         new_state['board'][new_r, new_c] *= 2
+                        promotion_made = True
                     
                     # Reset move counter if capture or promotion
-                    if new_state['jump_again'] or new_state['board'][new_r, new_c] == 2 * player:
+                    if capture_made or promotion_made:
                         new_state['no_progress_moves'] = 0
                     else:
                         new_state['no_progress_moves'] += 1
                     
-                    # Update board history
+                    # Update position counts
                     board_hash = new_state['board'].tobytes()
-                    new_state['board_history'][board_hash] += 1
+                    new_state['state_repetitions'][board_hash] += 1
+                    
+                    # Update board timesteps (only when turn actually ends, not during multi-jumps)
+                    if new_state['jump_again'] is None:
+                        new_state['board_timesteps'].append(new_state['board'].copy())
+                        # Keep only the last history_timesteps boards
+                        if len(new_state['board_timesteps']) > self.history_timesteps:
+                            new_state['board_timesteps'] = new_state['board_timesteps'][-self.history_timesteps:]
                     
                     return new_state
                     
-        return new_state  # still return if not action is matched
+        return new_state  # still return if no action is matched
     
     def show_valid_moves(self, valid_moves):
         print("Valid Moves")
@@ -283,10 +303,10 @@ class Checkers:
             
     def check_win(self, state, player):
         """Returns True if the given player has won, meaning the opponent has no pieces or no valid moves."""
-        opponent = self.get_opponent(player)  # Opponent's piece value
+        opponent = self.get_opponent(player)
 
         # Check if opponent has any pieces left
-        opponent_pieces = np.where((state['board'] == opponent) | (state['board'] == 2 * opponent))  # Normal and king pieces
+        opponent_pieces = np.where((state['board'] == opponent) | (state['board'] == 2 * opponent))
         if len(opponent_pieces[0]) == 0:
             return True  # Opponent has no pieces, player wins
 
@@ -295,23 +315,23 @@ class Checkers:
         state_copy['jump_again'] = None
         valid_moves_opponent = self.get_valid_moves(state_copy, opponent)
         if not valid_moves_opponent.any():
-            return True  # No valid moves, player wins by opponent's forced pass
-        return False  # Game is still ongoing
+            return True  # No valid moves, player wins by stalemate
+        return False
     
     def check_draw(self, state):
-        """Returns True if the game is a draw (threefold repetition or move limit without capture/promotion)."""
-        # Check threefold repetition rule (draw due to repeated board states)
-        if any(count >= 3 for count in state['board_history'].values()):
+        """Returns True if the game is a draw (repetition limit or no-progress limit reached)."""
+        # Check repetition limit
+        if any(count >= self.repetition_limit for count in state['state_repetitions'].values()):
             return True
 
-        # Check if move limit without capture/promotion is reached
+        # Check no-progress move limit
         if state['no_progress_moves'] >= self.draw_move_limit:
-            return True  # Draw due to move limit
+            return True
 
-        return False  # Game is still ongoing
+        return False
     
     def get_value_and_terminated(self, state, player):
-        """Determine if the game is over and log results if tracking stats."""
+        """Determine if the game is over."""
         if self.check_win(state, player):
             return 1, True  # Player wins
         
@@ -321,7 +341,7 @@ class Checkers:
         if self.check_draw(state):
             return 0, True  # Draw
 
-        return 0, False  # Game is still ongoing
+        return 0, False  # Game continues
     
     def get_opponent(self, player):
         return -player
@@ -331,75 +351,126 @@ class Checkers:
     
     def get_encoded_state(self, state, player):
         """
-        FIXED: Consistent state encoding regardless of player
+        Enhanced state encoding with historical timesteps and additional features.
+        
+        Returns state encoding with:
+        - Historical board positions (4 planes × history_timesteps)
+        - Current position repetition count (1 plane)
+        - No progress moves count (1 plane)
+        - Player color (1 plane)
+        
+        Total planes: 4 * history_timesteps + 3
         """
         board = state['board']
+        board_timesteps = state.get('board_timesteps', [board])
         
-        if player == 1:
-            # Player 1's perspective: their pieces are positive in channels 2-3
-            encoded_state = np.stack([
-                board == -2,  # Opponent kings
-                board == -1,  # Opponent normal pieces
-                board == 1,   # Player normal pieces  
-                board == 2    # Player kings
-            ]).astype(np.float32)
-        else:  # player == -1
-            # Player -1's perspective: their pieces become positive in channels 2-3
-            encoded_state = np.stack([
-                board == 2,   # Opponent kings (was player 1's)
-                board == 1,   # Opponent normal pieces (was player 1's)
-                board == -1,  # Player normal pieces (now positive)
-                board == -2   # Player kings (now positive)
-            ]).astype(np.float32)
+        # Ensure we have enough timesteps (pad with zeros if needed)
+        timesteps_needed = self.history_timesteps
+        while len(board_timesteps) < timesteps_needed:
+            zero_board = np.zeros_like(board)
+            board_timesteps = [zero_board] + board_timesteps
+        
+        # Take only the most recent timesteps
+        recent_timesteps = board_timesteps[-timesteps_needed:]
+        
+        # Create timestep planes for each historical board
+        timestep_planes = []
+        for timestep_board in recent_timesteps:
+            if player == 1:
+                # Player 1's perspective
+                planes = [
+                    timestep_board == -2,  # Opponent kings
+                    timestep_board == -1,  # Opponent normal pieces
+                    timestep_board == 1,   # Player normal pieces  
+                    timestep_board == 2    # Player kings
+                ]
+            else:  # player == -1
+                # Player -1's perspective  
+                planes = [
+                    timestep_board == 2,   # Opponent kings
+                    timestep_board == 1,   # Opponent normal pieces
+                    timestep_board == -1,  # Player normal pieces
+                    timestep_board == -2   # Player kings
+                ]
+            timestep_planes.extend(planes)
+        
+        # Additional feature planes
+        # Current position repetition count (normalized)
+        board_hash = board.tobytes()
+        current_repetitions = state['state_repetitions'].get(board_hash, 0)
+        repetition_plane = np.full((self.row_count, self.col_count), 
+                                 min(current_repetitions / self.repetition_limit, 1.0), 
+                                 dtype=np.float32)
+        
+        # No progress moves count (normalized)
+        no_progress_plane = np.full((self.row_count, self.col_count), 
+                                  min(state['no_progress_moves'] / self.draw_move_limit, 1.0), 
+                                  dtype=np.float32)
+        
+        # Player color (1 for player 1, 0 for player -1)
+        player_plane = np.full((self.row_count, self.col_count), 
+                             1.0 if player == 1 else 0.0, 
+                             dtype=np.float32)
+        
+        # Combine all planes
+        all_planes = timestep_planes + [repetition_plane, no_progress_plane, player_plane]
+        encoded_state = np.stack(all_planes).astype(np.float32)
         
         return encoded_state
     
+    def get_num_channels(self):
+        """Return the number of channels in the encoded state."""
+        return 4 * self.history_timesteps + 3
+    
     def decode_encoded_state(self, encoded_state, player):
         """
-        Converts an encoded state back into the board representation.
-
-        Args:
-        - encoded_state: The encoded board state as a NumPy array.
-        - player: The player perspective used in encoding.
-
-        Returns:
-        - A NumPy array representing the board.
+        Converts an encoded state back into the most recent board representation.
         """
         board = np.zeros((self.row_count, self.col_count), dtype=int)
         
+        # The most recent board state is in the last 4 channels of timestep data
+        recent_start = (self.history_timesteps - 1) * 4
+        recent_planes = encoded_state[recent_start:recent_start + 4]
+        
         if player == 1:
-            board[encoded_state[0] == 1] = -2  # Opponent kings
-            board[encoded_state[1] == 1] = -1  # Opponent normal pieces
-            board[encoded_state[2] == 1] = 1   # Player normal pieces
-            board[encoded_state[3] == 1] = 2   # Player kings
+            board[recent_planes[0] == 1] = -2  # Opponent kings
+            board[recent_planes[1] == 1] = -1  # Opponent normal pieces
+            board[recent_planes[2] == 1] = 1   # Player normal pieces
+            board[recent_planes[3] == 1] = 2   # Player kings
         else:  # player == -1
-            board[encoded_state[0] == 1] = 2   # Opponent kings
-            board[encoded_state[1] == 1] = 1   # Opponent normal pieces  
-            board[encoded_state[2] == 1] = -1  # Player normal pieces
-            board[encoded_state[3] == 1] = -2  # Player kings
+            board[recent_planes[0] == 1] = 2   # Opponent kings
+            board[recent_planes[1] == 1] = 1   # Opponent normal pieces  
+            board[recent_planes[2] == 1] = -1  # Player normal pieces
+            board[recent_planes[3] == 1] = -2  # Player kings
 
         return board
 
 
 if __name__ == "__main__":
-    checkers = Checkers(row_count=8, col_count=8, buffer_count=2, draw_move_limit=50)
+    checkers = Checkers(
+        row_count=8, 
+        col_count=8, 
+        buffer_count=2, 
+        draw_move_limit=50,
+        repetition_limit=3,
+        history_timesteps=4
+    )
     state = checkers.get_initial_state()
     player = 1
-    # state, player = checkers.load_state("state_multiJump3.txt")
 
     while True:
-        checkers.show_board(state)  # Print board with row/col indices
+        checkers.show_board(state)
 
         # Get valid moves for the current player
         valid_moves = checkers.get_valid_moves(state, player)
 
-        # Extract valid move indices (mapping user-friendly index -> actual move index)
+        # Extract valid move indices
         move_mapping = [idx for idx, is_valid in enumerate(valid_moves) if is_valid]
 
         # Print valid moves
         checkers.show_valid_moves(valid_moves)
 
-        # Keep asking until a valid move is chosen
+        # Get user input
         quit = False
         while True:
             action = input(f"Player {player}, select a move (0-{len(move_mapping) - 1}) or type 'q' to quit: ").strip()
@@ -410,11 +481,11 @@ if __name__ == "__main__":
 
             try:
                 action = int(action)
-                if 0 <= action < len(move_mapping):  # Ensure the input is within range
-                    action = move_mapping[action]  # Map input to actual move index
+                if 0 <= action < len(move_mapping):
+                    action = move_mapping[action]
                     break
             except ValueError:
-                pass  # Ignore invalid input
+                pass
                 
             print("Invalid input! Enter a number corresponding to a valid move or 'q' to quit.")
 
@@ -439,13 +510,13 @@ if __name__ == "__main__":
 
                 # Identify the draw reason
                 if state['no_progress_moves'] >= checkers.draw_move_limit:
-                    print("Reason: 50-move rule triggered.")
-                elif any(count >= 3 for count in state['board_history'].values()):
-                    print("Reason: Threefold repetition.")
+                    print("Reason: No-progress move limit reached.")
+                elif any(count >= checkers.repetition_limit for count in state['state_repetitions'].values()):
+                    print("Reason: Position repetition limit reached.")
                 else:
                     print("Reason: Stalemate.")
             break
 
-        # If the last move didn't require another jump, switch players
+        # Switch players if not multi-jumping
         if state['jump_again'] is None:
             player = checkers.get_opponent(player)

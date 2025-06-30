@@ -4,6 +4,9 @@ model/
 *.json
 *.ipynb
 *.png
+*.pdf
+*.log
+*.pt
 
 play.py
 MCTS.py

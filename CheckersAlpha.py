@@ -7,9 +7,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import random
 import json
-import hashlib
 
-from Checkers2 import Checkers
+from Checkers import Checkers
 
 
 # torch.manual_seed(0)
