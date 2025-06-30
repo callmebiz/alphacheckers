@@ -1,0 +1,54 @@
+{
+  "description": "Quick debugging configuration with all optimizations - ~10 minutes total",
+  "estimated_time": "10 minutes",
+  "use_case": "Code testing, bug fixing, rapid iteration with enhanced features",
+  
+  "game_config": {
+    "row_count": 8,
+    "col_count": 8,
+    "buffer_count": 2,
+    "draw_move_limit": 50,
+    "repetition_limit": 3,
+    "history_timesteps": 2
+  },
+  
+  "model_config": {
+    "num_resBlocks": 4,
+    "num_hidden": 32,
+    "use_checkpoint": false
+  },
+  
+  "training_args": {
+    "C": 2,
+    "num_searches": 50,
+    "num_iterations": 3,
+    "num_self_play_iterations": 5,
+    "num_epochs": 3,
+    "batch_size": 16,
+    "initial_temperature": 1.4,
+    "final_temperature": 1.0,
+    "use_temperature": true,
+    "dirichlet_epsilon": 0.25,
+    "dirichlet_alpha": 0.5,
+    "lr_decay_steps": 2,
+    "lr_decay_factor": 0.9
+  },
+  
+  "optimizer_config": {
+    "lr": 0.01,
+    "weight_decay": 0.0001
+  },
+  
+  "use_mixed_precision": true,
+  
+  "notes": [
+    "Minimal MCTS simulations for speed",
+    "Small network for faster training",
+    "Only 2 history timesteps to reduce memory",
+    "High learning rate for quick updates",
+    "Perfect for testing code changes",
+    "Mixed precision enabled for GPU efficiency testing",
+    "Gradient checkpointing disabled for faster debug iterations",
+    "Dynamic temperature control for better exploration testing"
+  ]
+}

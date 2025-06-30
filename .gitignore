@@ -1,7 +1,8 @@
 __pycache__/
 saved_models*/
 model/
-*.json
+modelsv2/
+logs/
 *.ipynb
 *.png
 *.pdf
